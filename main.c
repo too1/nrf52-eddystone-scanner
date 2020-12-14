@@ -113,16 +113,6 @@ void assert_nrf_callback(uint16_t line_num, const uint8_t * p_file_name)
 }
 
 
-/**@brief Function for handling the LED Button Service client errors.
- *
- * @param[in]   nrf_error   Error code containing information about what went wrong.
- */
-static void lbs_error_handler(uint32_t nrf_error)
-{
-    APP_ERROR_HANDLER(nrf_error);
-}
-
-
 /**@brief Function for the LEDs initialization.
  *
  * @details Initializes all LEDs used by the application.
@@ -292,14 +282,31 @@ static void button_event_handler(uint8_t pin_no, uint8_t button_action)
 static void scan_evt_handler(scan_evt_t const * p_scan_evt)
 {
     ret_code_t err_code;
+    uint8_t *adv_data, *eddystone_service_data;
+    uint16_t adv_data_len, eddystone_service_data_len, offset = 0;
 
     switch(p_scan_evt->scan_evt_id)
     {
         case NRF_BLE_SCAN_EVT_FILTER_MATCH:
             NRF_LOG_INFO("Eddystone beacon packet received");
+
+            // Look for the Eddystone beacon content in the advertising payload
+            adv_data = p_scan_evt->params.filter_match.p_adv_report->data.p_data;
+            adv_data_len = p_scan_evt->params.filter_match.p_adv_report->data.len;
+            eddystone_service_data_len = ble_advdata_search(adv_data, adv_data_len, 
+                                                            &offset,
+                                                            BLE_GAP_AD_TYPE_SERVICE_DATA);
+            eddystone_service_data = &adv_data[offset];
+
+            // Write the Eddystone data to the log
+            NRF_LOG_HEXDUMP_INFO(eddystone_service_data, eddystone_service_data_len);
+
+            // Add your own code here to do something else with the Eddystone data
             break;
+
         case NRF_BLE_SCAN_EVT_NOT_FOUND:
             break;
+
         default:
           break;
     }
