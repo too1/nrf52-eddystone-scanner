@@ -59,7 +59,6 @@
 #include "ble_advertising.h"
 #include "ble_conn_params.h"
 #include "ble_db_discovery.h"
-#include "ble_lbs_c.h"
 #include "nrf_ble_gatt.h"
 #include "nrf_ble_scan.h"
 
@@ -88,14 +87,13 @@
 #define APP_BLE_OBSERVER_PRIO           3                                   /**< Application's BLE observer priority. You shouldn't need to modify this value. */
 
 NRF_BLE_SCAN_DEF(m_scan);                                       /**< Scanning module instance. */
-BLE_LBS_C_DEF(m_ble_lbs_c);                                     /**< Main structure used by the LBS client module. */
 NRF_BLE_GATT_DEF(m_gatt);                                       /**< GATT module instance. */
 BLE_DB_DISCOVERY_DEF(m_db_disc);                                /**< DB discovery module instance. */
 NRF_BLE_GQ_DEF(m_ble_gatt_queue,                                /**< BLE GATT Queue instance. */
                NRF_SDH_BLE_CENTRAL_LINK_COUNT,
                NRF_BLE_GQ_QUEUE_SIZE);
 
-static char const m_target_periph_name[] = "Nordic_Blinky";     /**< Name of the device we try to connect to. This name is searched in the scan report data*/
+static ble_uuid_t eddystone_service_uuid = {.uuid = 0xFEAA, .type = BLE_UUID_TYPE_BLE};
 
 
 /**@brief Function to handle asserts in the SoftDevice.
@@ -149,49 +147,6 @@ static void scan_start(void)
 }
 
 
-/**@brief Handles events coming from the LED Button central module.
- */
-static void lbs_c_evt_handler(ble_lbs_c_t * p_lbs_c, ble_lbs_c_evt_t * p_lbs_c_evt)
-{
-    switch (p_lbs_c_evt->evt_type)
-    {
-        case BLE_LBS_C_EVT_DISCOVERY_COMPLETE:
-        {
-            ret_code_t err_code;
-
-            err_code = ble_lbs_c_handles_assign(&m_ble_lbs_c,
-                                                p_lbs_c_evt->conn_handle,
-                                                &p_lbs_c_evt->params.peer_db);
-            NRF_LOG_INFO("LED Button service discovered on conn_handle 0x%x.", p_lbs_c_evt->conn_handle);
-
-            err_code = app_button_enable();
-            APP_ERROR_CHECK(err_code);
-
-            // LED Button service discovered. Enable notification of Button.
-            err_code = ble_lbs_c_button_notif_enable(p_lbs_c);
-            APP_ERROR_CHECK(err_code);
-        } break; // BLE_LBS_C_EVT_DISCOVERY_COMPLETE
-
-        case BLE_LBS_C_EVT_BUTTON_NOTIFICATION:
-        {
-            NRF_LOG_INFO("Button state changed on peer to 0x%x.", p_lbs_c_evt->params.button.button_state);
-            if (p_lbs_c_evt->params.button.button_state)
-            {
-                bsp_board_led_on(LEDBUTTON_LED);
-            }
-            else
-            {
-                bsp_board_led_off(LEDBUTTON_LED);
-            }
-        } break; // BLE_LBS_C_EVT_BUTTON_NOTIFICATION
-
-        default:
-            // No implementation needed.
-            break;
-    }
-}
-
-
 /**@brief Function for handling BLE events.
  *
  * @param[in]   p_ble_evt   Bluetooth stack event.
@@ -211,8 +166,6 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
         case BLE_GAP_EVT_CONNECTED:
         {
             NRF_LOG_INFO("Connected.");
-            err_code = ble_lbs_c_handles_assign(&m_ble_lbs_c, p_gap_evt->conn_handle, NULL);
-            APP_ERROR_CHECK(err_code);
 
             err_code = ble_db_discovery_start(&m_db_disc, p_gap_evt->conn_handle);
             APP_ERROR_CHECK(err_code);
@@ -285,22 +238,6 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
 }
 
 
-/**@brief LED Button client initialization.
- */
-static void lbs_c_init(void)
-{
-    ret_code_t       err_code;
-    ble_lbs_c_init_t lbs_c_init_obj;
-
-    lbs_c_init_obj.evt_handler   = lbs_c_evt_handler;
-    lbs_c_init_obj.p_gatt_queue  = &m_ble_gatt_queue;
-    lbs_c_init_obj.error_handler = lbs_error_handler;
-
-    err_code = ble_lbs_c_init(&m_ble_lbs_c, &lbs_c_init_obj);
-    APP_ERROR_CHECK(err_code);
-}
-
-
 /**@brief Function for initializing the BLE stack.
  *
  * @details Initializes the SoftDevice and the BLE event interrupts.
@@ -339,17 +276,6 @@ static void button_event_handler(uint8_t pin_no, uint8_t button_action)
     switch (pin_no)
     {
         case LEDBUTTON_BUTTON_PIN:
-            err_code = ble_lbs_led_status_send(&m_ble_lbs_c, button_action);
-            if (err_code != NRF_SUCCESS &&
-                err_code != BLE_ERROR_INVALID_CONN_HANDLE &&
-                err_code != NRF_ERROR_INVALID_STATE)
-            {
-                APP_ERROR_CHECK(err_code);
-            }
-            if (err_code == NRF_SUCCESS)
-            {
-                NRF_LOG_INFO("LBS write LED state %d", button_action);
-            }
             break;
 
         default:
@@ -369,9 +295,10 @@ static void scan_evt_handler(scan_evt_t const * p_scan_evt)
 
     switch(p_scan_evt->scan_evt_id)
     {
-        case NRF_BLE_SCAN_EVT_CONNECTING_ERROR:
-            err_code = p_scan_evt->params.connecting_err.err_code;
-            APP_ERROR_CHECK(err_code);
+        case NRF_BLE_SCAN_EVT_FILTER_MATCH:
+            NRF_LOG_INFO("Eddystone beacon packet received");
+            break;
+        case NRF_BLE_SCAN_EVT_NOT_FOUND:
             break;
         default:
           break;
@@ -408,7 +335,7 @@ static void buttons_init(void)
  */
 static void db_disc_handler(ble_db_discovery_evt_t * p_evt)
 {
-    ble_lbs_on_db_disc_evt(&m_ble_lbs_c, p_evt);
+
 }
 
 
@@ -464,17 +391,17 @@ static void scan_init(void)
 
     memset(&init_scan, 0, sizeof(init_scan));
 
-    init_scan.connect_if_match = true;
+    init_scan.connect_if_match = false;
     init_scan.conn_cfg_tag     = APP_BLE_CONN_CFG_TAG;
 
     err_code = nrf_ble_scan_init(&m_scan, &init_scan, scan_evt_handler);
     APP_ERROR_CHECK(err_code);
 
     // Setting filters for scanning.
-    err_code = nrf_ble_scan_filters_enable(&m_scan, NRF_BLE_SCAN_NAME_FILTER, false);
+    err_code = nrf_ble_scan_filters_enable(&m_scan, NRF_BLE_SCAN_UUID_FILTER, false);
     APP_ERROR_CHECK(err_code);
 
-    err_code = nrf_ble_scan_filter_set(&m_scan, SCAN_NAME_FILTER, m_target_periph_name);
+    err_code = nrf_ble_scan_filter_set(&m_scan, SCAN_UUID_FILTER, &eddystone_service_uuid);
     APP_ERROR_CHECK(err_code);
 }
 
@@ -511,7 +438,6 @@ int main(void)
     scan_init();
     gatt_init();
     db_discovery_init();
-    lbs_c_init();
 
     // Start execution.
     NRF_LOG_INFO("Blinky CENTRAL example started.");
